@@ -197,3 +197,4 @@ wsl bash -lc "cat ~/.hermes/config.yaml | head -3"
 # 3. Paperclip запущен
 curl http://127.0.0.1:3100/api/health
 ```
+Если есть сложности с настройкой, посмотрите полное видео на Ютубе: MiniMax (ZAI) + Paperclip оркестратор https://www.youtube.com/playlist?list=PL6D9b9lf9gb2_0Wpg5HcYenthYSK9KznR
