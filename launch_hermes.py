@@ -126,80 +126,54 @@ except Exception as e:
     sys.exit(1)
 
 # ═════════════════════════════════════════════════════════════════════════════
-# ШАГ 2: Запускаем hermes, ждём баннер загрузки
+# ШАГ 2: Пишем промпт в /tmp/hermes_prompt.txt в WSL
 # ═════════════════════════════════════════════════════════════════════════════
-log('ШАГ 2: запускаем hermes')
+log('ШАГ 2: пишем промпт в WSL /tmp/hermes_prompt.txt')
 try:
-    proc = subprocess.Popen(
-        ['wsl', 'bash', '-lc', 'hermes'],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+    subprocess.run(
+        ['wsl', 'bash', '-c', 'cat > /tmp/hermes_prompt.txt'],
+        input=prompt.encode('utf-8')
     )
-    log(f'ШАГ 2 OK: процесс запущен (pid={proc.pid})')
-except FileNotFoundError:
-    log('ШАГ 2 ОШИБКА: wsl.exe не найден')
-    sys.exit(1)
+    log(f'ШАГ 2 OK: промпт записан ({len(prompt)} символов)')
 except Exception as e:
     log(f'ШАГ 2 ОШИБКА: {type(e).__name__}: {e}')
     sys.exit(1)
 
-READY_TRIGGER = b'\xe2\x9d\xaf'   # ❯ — hermes ждёт ввода, ZAI готов
-
-output_lines  = []
-ready_event   = threading.Event()
-
-def _stdout_reader(proc, output_lines, ready_event):
-    """Читает stdout hermes: пишет сырые байты в последний_запуск.txt."""
-    try:
-        for raw_line in iter(proc.stdout.readline, b''):
-            output_lines.append(raw_line)
-            _session_write_raw(raw_line)
-            sys.stdout.buffer.write(raw_line)
-            sys.stdout.buffer.flush()
-            if not ready_event.is_set() and READY_TRIGGER in raw_line:
-                log(f'ШАГ 2: триггер ❯ обнаружен — ZAI готов')
-                ready_event.set()
-    except Exception as e:
-        log(f'_stdout_reader ОШИБКА: {type(e).__name__}: {e}')
-    finally:
-        ready_event.set()
-
-reader_thread = threading.Thread(
-    target=_stdout_reader,
-    args=(proc, output_lines, ready_event),
-    daemon=True
-)
-reader_thread.start()
-
-ready_event.wait()
-log('ШАГ 2 OK: ZAI готов, отправляем промпт')
-
 # ═════════════════════════════════════════════════════════════════════════════
-# ШАГ 3: Проверяем что hermes жив, отправляем промпт
+# ШАГ 3: Запускаем hermes с -q, весь вывод пишем в лог
 # ═════════════════════════════════════════════════════════════════════════════
-log('ШАГ 3: отправляем промпт')
-
-if proc.poll() is not None:
-    log(f'ШАГ 3 ОШИБКА: hermes завершился до отправки промпта (returncode={proc.poll()})')
-    sys.exit(1)
-
+log('ШАГ 3: запускаем hermes -q "$(cat /tmp/hermes_prompt.txt)"')
 try:
-    proc.stdin.write(prompt.encode('utf-8') + b'\n')
-    proc.stdin.flush()
-    proc.stdin.close()
-    log(f'ШАГ 3 OK: промпт отправлен ({len(prompt)} символов), stdin закрыт')
-except BrokenPipeError:
-    log('ШАГ 3 ОШИБКА: BrokenPipe — hermes умер при инициализации')
+    proc = subprocess.Popen(
+        ['wsl', 'bash', '-lc', 'hermes -q "$(cat /tmp/hermes_prompt.txt)"'],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    log(f'ШАГ 3 OK: процесс запущен (pid={proc.pid})')
+except FileNotFoundError:
+    log('ШАГ 3 ОШИБКА: wsl.exe не найден')
     sys.exit(1)
 except Exception as e:
     log(f'ШАГ 3 ОШИБКА: {type(e).__name__}: {e}')
     sys.exit(1)
 
+def _stdout_reader(proc):
+    """Читает stdout hermes: пишет сырые байты в последний_запуск.txt."""
+    try:
+        for raw_line in iter(proc.stdout.readline, b''):
+            _session_write_raw(raw_line)
+            sys.stdout.buffer.write(raw_line)
+            sys.stdout.buffer.flush()
+    except Exception as e:
+        log(f'_stdout_reader ОШИБКА: {type(e).__name__}: {e}')
+
+reader_thread = threading.Thread(target=_stdout_reader, args=(proc,), daemon=True)
+reader_thread.start()
+
 # ═════════════════════════════════════════════════════════════════════════════
 # ШАГ 4: Ждём завершения hermes
 # ═════════════════════════════════════════════════════════════════════════════
-log('ШАГ 4: ждём завершения hermes (макс. 300 секунд)')
+log('ШАГ 4: ждём завершения hermes')
 try:
     reader_thread.join()
     returncode = proc.wait()
