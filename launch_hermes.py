@@ -144,14 +144,10 @@ except Exception as e:
     log(f'ШАГ 2 ОШИБКА: {type(e).__name__}: {e}')
     sys.exit(1)
 
-READY_INDICATORS = [
-    b'Welcome',
-    b'Hermes Agent',
-    b'\xe2\x9d\xaf',   # ❯
-]
+READY_TRIGGER = b'\xe2\x9d\xaf'   # ❯ — hermes ждёт ввода, ZAI готов
 
-output_lines = []
-ready_event  = threading.Event()
+output_lines  = []
+ready_event   = threading.Event()
 
 def _stdout_reader(proc, output_lines, ready_event):
     """Читает stdout hermes: пишет сырые байты в последний_запуск.txt."""
@@ -161,10 +157,9 @@ def _stdout_reader(proc, output_lines, ready_event):
             _session_write_raw(raw_line)
             sys.stdout.buffer.write(raw_line)
             sys.stdout.buffer.flush()
-            if not ready_event.is_set():
-                if any(ind in raw_line for ind in READY_INDICATORS):
-                    log(f'ШАГ 2: готов — {raw_line.decode("utf-8","replace").strip()!r}')
-                    ready_event.set()
+            if not ready_event.is_set() and READY_TRIGGER in raw_line:
+                log(f'ШАГ 2: триггер ❯ обнаружен — ZAI готов')
+                ready_event.set()
     except Exception as e:
         log(f'_stdout_reader ОШИБКА: {type(e).__name__}: {e}')
     finally:
@@ -178,7 +173,7 @@ reader_thread = threading.Thread(
 reader_thread.start()
 
 ready_event.wait()
-log('ШАГ 2 OK: hermes готов')
+log('ШАГ 2 OK: ZAI готов, отправляем промпт')
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ШАГ 3: Проверяем что hermes жив, отправляем промпт
