@@ -55,6 +55,21 @@ ZAI API (https://api.z.ai/api/paas/v4) — модель zai/glm-4.5-flash
 
 ---
 
+## Внешние файлы (вне репозитория)
+
+Часть файлов живёт **вне этого репозитория** — в домашней папке Windows и в WSL.
+Без них интеграция не заработает.
+
+📁 Смотри: **[external_files/README.md](external_files/README.md)**
+
+Там описаны:
+- `~/.wslconfig` — WSL2 mirrored networking (без него ZAI не видит Paperclip API)
+- `~/.hermes/config.yaml` — конфиг hermes с моделью ZAI
+- заглушка `hermes.cmd` для Windows PATH
+- **почему Hermes нельзя установить через AI CLI** (инсталлятор интерактивный — агент зависнет)
+
+---
+
 ## Файлы в этом репозитории
 
 ### Исполняемые файлы (вся логика живёт здесь)
@@ -63,10 +78,6 @@ ZAI API (https://api.z.ai/api/paas/v4) — модель zai/glm-4.5-flash
 |------|-----------|
 | `launch_hermes.py` | **Главный Python-мост** Windows→WSL. Читает задачу из Paperclip API, пишет промпт в WSL-файл, запускает hermes. |
 | `hermes.cmd` | **Windows entry point** для этой папки. Вызывает `launch_hermes.py` из той же директории. |
-
-### Архив — старые файлы (перенесены из ZIA)
-
-Папка `archive\` содержит исходные файлы из `C:\Users\vibecoder_blogger\Documents\Claude\Projects\ZIA\` — на случай если что-то нужно восстановить. Эти файлы больше не используются Paperclip.
 
 ### Вспомогательные файлы
 
