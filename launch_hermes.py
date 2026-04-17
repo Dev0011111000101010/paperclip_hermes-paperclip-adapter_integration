@@ -142,10 +142,18 @@ except Exception as e:
 # ═════════════════════════════════════════════════════════════════════════════
 # ШАГ 3: Запускаем hermes с -q, весь вывод пишем в лог
 # ═════════════════════════════════════════════════════════════════════════════
-log('ШАГ 3: запускаем hermes -q "$(cat /tmp/hermes_prompt.txt)"')
+log('ШАГ 3: запускаем hermes chat через python3 в WSL (без bash-кавычек)')
 try:
+    # Используем python3 в WSL чтобы передать промпт напрямую как аргумент,
+    # без bash-интерпретации кавычек и бэктиков внутри промпта
+    py_cmd = (
+        'import subprocess, sys; '
+        'p = open("/tmp/hermes_prompt.txt").read(); '
+        'r = subprocess.run(["hermes", "chat", "-q", p, "--yolo"]); '
+        'sys.exit(r.returncode)'
+    )
     proc = subprocess.Popen(
-        ['wsl', 'bash', '-lc', 'hermes -q "$(cat /tmp/hermes_prompt.txt)"'],
+        ['wsl', 'python3', '-c', py_cmd],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
