@@ -1,7 +1,7 @@
-# Hermes Agent + Paperclip + ZAI (GLM-4.6) — Инструкция по настройке
+# Hermes Agent + Paperclip + ZAI — Интеграция и настройка
 
-Эта инструкция поможет поднять связку:
-**Paperclip** (платформа для управления AI-агентами) + **Hermes Agent** (AI-агент от Nous Research) + **ZAI / GLM-4.6** (бесплатная языковая модель от z.ai).
+Эта инструкция описывает полную рабочую связку:
+**Paperclip** (оркестратор AI-агентов) → **hermes.cmd** (Windows-мост) → **WSL2/Ubuntu** → **Hermes Agent** → **ZAI API** (модель `zai/glm-4.5-flash`, бесплатно).
 
 ## Официальные ссылки
 
@@ -17,36 +17,154 @@
 ## Требования
 
 - Windows 10/11 с WSL2 (Ubuntu)
-- Node.js 20+
-- Python 3.10+ (в WSL Ubuntu — ставится автоматически)
-- Аккаунт на [z.ai](https://z.ai) для получения бесплатного API ключа
+- Node.js 20+ (для Paperclip)
+- Python 3.10+ (Windows, для launch_hermes.py)
+- Python 3.10+ (WSL Ubuntu, для hermes-agent)
+- Аккаунт на [z.ai](https://z.ai) для бесплатного API ключа
 
 ---
 
-## Архитектура связки
+## Архитектура: полная цепочка вызовов
 
 ```
-Paperclip (Node.js, Windows)
+Paperclip (Node.js, Windows, порт 3100)
     │
-    │  вызывает команду "hermes"
+    │  resolveSpawnTarget → вызывает hermes.cmd напрямую:
+    │  cmd.exe /d /s /c "C:\Users\...\PycharmProjects\...\hermes.cmd" chat -q "..."
     ▼
-hermes.bat  (C:\Users\<USER>\bin\hermes.bat, в Windows PATH)
+C:\Users\vibecoder_blogger\PycharmProjects\
+  paperclip_hermes-paperclip-adapter_integration\hermes.cmd   ← ГЛАВНЫЙ ENTRY POINT
     │
-    │  wsl bash -lc "hermes ..."
+    │  python "%~dp0launch_hermes.py" %*
     ▼
-hermes-agent (Python, установлен в WSL Ubuntu)
+C:\Users\vibecoder_blogger\PycharmProjects\
+  paperclip_hermes-paperclip-adapter_integration\launch_hermes.py   ← ВСЯ ЛОГИКА ЗДЕСЬ
     │
-    │  читает ~/.hermes/config.yaml и ~/.hermes/.env
+    │  1. Читает env vars: PAPERCLIP_TASK_ID, PAPERCLIP_API_URL, ...
+    │  2. Делает HTTP GET к Paperclip API → получает текст задачи
+    │  3. Пишет промпт в /tmp/hermes_prompt.txt (через WSL pipe)
+    │  4. Запускает: wsl bash -lc '/usr/local/bin/hermes chat -q "$(cat /tmp/hermes_prompt.txt)" ...'
     ▼
-ZAI API (z.ai) — модель GLM-4.6
+WSL2 Ubuntu — /usr/local/bin/hermes chat
+    │
+    │  ~/.hermes/config.yaml (модель, провайдер)
+    │  ~/.hermes/.env (ZAI_API_KEY)
+    ▼
+ZAI API (https://api.z.ai/api/paas/v4) — модель zai/glm-4.5-flash
 ```
-
-**Почему через WSL?**
-Hermes Agent — Python-пакет. На Windows проще и надёжнее запускать его в WSL Ubuntu, а в Windows создать `.bat`-обёртку, которая перенаправляет вызовы в WSL.
 
 ---
 
-## Быстрая установка (автоматически)
+## Файлы в этом репозитории
+
+### Исполняемые файлы (вся логика живёт здесь)
+
+| Файл | Что делает |
+|------|-----------|
+| `launch_hermes.py` | **Главный Python-мост** Windows→WSL. Читает задачу из Paperclip API, пишет промпт в WSL-файл, запускает hermes. |
+| `hermes.cmd` | **Windows entry point** для этой папки. Вызывает `launch_hermes.py` из той же директории. |
+
+### Архив — старые файлы (перенесены из ZIA)
+
+Папка `archive\` содержит исходные файлы из `C:\Users\vibecoder_blogger\Documents\Claude\Projects\ZIA\` — на случай если что-то нужно восстановить. Эти файлы больше не используются Paperclip.
+
+### Вспомогательные файлы
+
+| Файл | Куда класть | Что делает |
+|------|-------------|-----------|
+| `hermes.bat` | `C:\Users\<USER>\bin\hermes.bat` | Простая обёртка для ручного CLI-вызова hermes из Windows |
+| `config.yaml` | `~/.hermes/config.yaml` (в WSL) | Конфиг hermes: модель zai/glm-4.5-flash, провайдер zai |
+| `.env.template` | `~/.hermes/.env` (в WSL, переименовать) | Шаблон для API ключей ZAI |
+| `install_hermes_wsl.ps1` | Любая папка Windows | Автоматическая установка всей связки |
+
+---
+
+## Содержимое ключевых файлов
+
+### `launch_hermes.py` — главная логика
+
+**Путь:** `C:\Users\vibecoder_blogger\PycharmProjects\paperclip_hermes-paperclip-adapter_integration\launch_hermes.py`
+
+Ключевые части:
+
+```python
+TEST_MODE = False          # True — тестовый режим (промпт = 'привет')
+                            # False — рабочий режим (промпт берётся из Paperclip API)
+
+# Paperclip передаёт эти env vars только в Assignment-запусках:
+task_id    = os.environ.get('PAPERCLIP_TASK_ID', '')   # UUID задачи
+agent_id   = os.environ.get('PAPERCLIP_AGENT_ID', '')
+company_id = os.environ.get('PAPERCLIP_COMPANY_ID', '')
+api_url    = os.environ.get('PAPERCLIP_API_URL', 'http://127.0.0.1:3100')
+```
+
+**Ключевой фикс квотирования** (почему промпт пишется в файл, а не передаётся аргументом):
+
+```
+ПРОБЛЕМА: cmd.exe /d /s /c "hermes.cmd" chat -q "You are ""Hermes Dev"", ..."
+  → cmd.exe /s/c снимает внешние кавычки
+  → Python получает промпт разбитым на отдельные слова в sys.argv
+
+ПРЕДЫДУЩАЯ ПОПЫТКА (stdin): hermes запускался в интерактивном режиме,
+  каждая строка промпта воспринималась как отдельный turn.
+
+ФИНАЛЬНОЕ РЕШЕНИЕ:
+  1. Записать промпт в файл: wsl bash -c "cat > /tmp/hermes_prompt.txt"
+  2. Передать в hermes: -q "$(cat /tmp/hermes_prompt.txt)"
+  Bash вычисляет $(cat ...) ВНУТРИ двойных кавычек — результат это ОДИН аргумент,
+  независимо от кавычек и переносов строк в содержимом файла.
+  Ни один символ промпта не проходит через cmd.exe.
+```
+
+Фрагмент кода с фиксом:
+```python
+# Запись промпта в WSL файл
+subprocess.run(
+    ['wsl', 'bash', '-c', 'cat > /tmp/hermes_prompt.txt'],
+    input=prompt.encode('utf-8'),
+    timeout=10
+)
+
+# Запуск hermes — $(cat file) = промпт как один аргумент, без проблем с кавычками
+bash_cmd = (
+    'echo "=== PROMPT SENT TO HERMES ===" && cat /tmp/hermes_prompt.txt && echo "=== END PROMPT ===" && '
+    '/usr/local/bin/hermes chat'
+    ' -q "$(cat /tmp/hermes_prompt.txt)"'
+    ' -Q -m zai/glm-4.5-flash --provider zai --source tool --yolo'
+)
+result = subprocess.run(['wsl', 'bash', '-lc', bash_cmd])
+```
+
+### `ZIA\hermes.cmd` — заглушка
+
+**Путь:** `C:\Users\vibecoder_blogger\ZIA\hermes.cmd`
+
+```batch
+@echo off
+rem ЗАГЛУШКА — вся логика в проектной папке
+if "%~1"=="" (
+  wsl hermes
+  goto :eof
+)
+python "C:\Users\vibecoder_blogger\PycharmProjects\paperclip_hermes-paperclip-adapter_integration\launch_hermes.py" %*
+```
+
+### `config.yaml` — конфиг hermes в WSL
+
+**Путь:** `~/.hermes/config.yaml` (внутри WSL Ubuntu)
+
+```yaml
+model: zai/glm-4.5-flash
+provider: zai
+base_url: https://api.z.ai/api/paas/v4
+compression:
+  enabled: true
+  threshold: 0.50
+```
+
+---
+
+## Быстрая установка
 
 ### Шаг 1 — Получить API ключ ZAI
 
@@ -61,25 +179,23 @@ Hermes Agent — Python-пакет. На Windows проще и надёжнее 
 .\install_hermes_wsl.ps1
 ```
 
-Скрипт:
-- Установит `hermes-agent` в WSL Ubuntu через `pip`
-- Запишет `~/.hermes/config.yaml` с моделью `zai/glm-4.6`
-- Запишет `~/.hermes/.env` с твоим API ключом
-- Создаст `hermes.bat` в `C:\Users\<USER>\bin\` и добавит папку в PATH
+### Шаг 3 — Настроить Paperclip-агента
 
-### Шаг 3 — Запустить Paperclip
-
-```powershell
-npx paperclipai@latest start
-```
-
-Открой браузер: http://127.0.0.1:3100
+1. Открой http://127.0.0.1:3100/MYA/agents/
+2. Нажми "New Agent" (или отредактируй существующего)
+3. В поле **Hermes Command** укажи полный путь:
+   ```
+   C:\Users\vibecoder_blogger\ZIA\hermes.cmd
+   ```
+   (это заглушка, которая делегирует в проектную папку)
+4. В **Environment Variables** добавь:
+   - `ZAI_API_KEY` = твой ключ с z.ai
+   - `GLM_API_KEY` = тот же ключ
+5. Нажми **Test Environment** — должно показать `Passed`
 
 ---
 
 ## Ручная установка (пошагово)
-
-Если хочешь понимать каждый шаг.
 
 ### 1. Установи WSL Ubuntu
 
@@ -87,114 +203,113 @@ npx paperclipai@latest start
 wsl --install -d Ubuntu
 ```
 
-Перезагрузи компьютер, если потребуется.
-
 ### 2. Установи hermes-agent в WSL
 
 ```bash
-# Открой терминал Ubuntu (WSL)
 pip install --upgrade hermes-agent
 ```
 
-### 3. Создай конфигурационные файлы в WSL
-
-**Файл `~/.hermes/config.yaml`** — используй файл `config.yaml` из этого репозитория:
+### 3. Создай конфигурацию hermes в WSL
 
 ```bash
 mkdir -p ~/.hermes
-# Скопируй содержимое config.yaml из этого репо в ~/.hermes/config.yaml
+
+# Скопируй config.yaml из этого репо:
+cp /mnt/c/Users/vibecoder_blogger/PycharmProjects/paperclip_hermes-paperclip-adapter_integration/config.yaml ~/.hermes/config.yaml
+
+# Создай .env с API ключом:
+echo "ZAI_API_KEY=ВАШ_КЛЮЧ" > ~/.hermes/.env
+echo "GLM_API_KEY=ВАШ_КЛЮЧ" >> ~/.hermes/.env
 ```
 
-**Файл `~/.hermes/.env`** — используй `.env.template`, переименуй в `.env` и вставь ключ:
+### 4. Проверь что hermes работает в WSL
 
 ```bash
-# ~/.hermes/.env
-ZAI_API_KEY=ВАШ_КЛЮЧ_С_z.ai
-GLM_API_KEY=ВАШ_КЛЮЧ_С_z.ai
+wsl bash -lc "hermes --version"
+# Ожидаемо: Hermes Agent v0.8.x
 ```
 
-### 4. Создай hermes.bat в Windows PATH
-
-Создай папку `C:\Users\<ВАШ_ПОЛЬЗОВАТЕЛЬ>\bin\` и положи туда файл `hermes.bat` из этого репозитория.
-
-Добавь эту папку в переменную среды PATH:
-- Win + R → `sysdm.cpl` → Дополнительно → Переменные среды
-- В разделе "Переменные пользователя" найди `Path` → Изменить → Создать
-- Добавь: `C:\Users\<ВАШ_ПОЛЬЗОВАТЕЛЬ>\bin`
-
-### 5. Проверь что hermes виден из Windows
-
-```powershell
-# В обычном PowerShell или CMD
-hermes --version
-```
-
-Должна появиться версия, например: `Hermes Agent v0.8.0`
-
-### 6. Установи и запусти Paperclip
+### 5. Запусти Paperclip
 
 ```powershell
 npx paperclipai@latest start
 ```
 
-При первом запуске пройди онбординг. Откроется http://127.0.0.1:3100
-
-### 7. Создай агента с Hermes-адаптером
-
-1. Перейди в http://127.0.0.1:3100/MYA/agents/
-2. Нажми "New Agent"
-3. В поле **Adapter** выбери `Hermes Agent (Local)`
-4. В поле **Model** укажи: `zai/glm-4.6`
-5. В поле **Hermes Command** оставь: `hermes`
-6. В секции **Environment Variables** добавь:
-   - `ZAI_API_KEY` = твой ключ с z.ai
-   - `GLM_API_KEY` = тот же ключ
-7. Нажми **Test Environment** — должно показать `Passed`
-8. Сохрани агента
+Открой: http://127.0.0.1:3100
 
 ---
 
-## Файлы в этом репозитории
+## Типы запусков Paperclip
 
-| Файл | Куда класть | Что делает |
-|------|-------------|------------|
-| `hermes.bat` | `C:\Users\<USER>\bin\hermes.bat` | Обёртка Windows → WSL |
-| `config.yaml` | `~/.hermes/config.yaml` (в WSL) | Конфиг hermes: модель, провайдер |
-| `.env.template` | `~/.hermes/.env` (в WSL, переименовать) | API ключи для ZAI |
-| `install_hermes_wsl.ps1` | Любая папка Windows, запустить | Автоматическая установка |
+| Тип | Когда | PAPERCLIP_TASK_ID | Поведение |
+|-----|-------|-------------------|-----------|
+| **Assignment run** | Задача назначена агенту | ✅ Установлен | launch_hermes.py получает задачу из API |
+| **Heartbeat run** | "Run Heartbeat" кнопка | ❌ Не установлен | hermes запускается без промпта (интерактивный режим) |
+
+**Важно:** чтобы запустить Assignment run повторно, нужно:
+1. Убрать назначение (поставить "No assignee")
+2. Заново назначить агента на задачу
 
 ---
 
-## Решение проблем
+## Отладка
 
-**`hermes: command not found` в PowerShell**
-→ Перезапусти PowerShell/терминал после добавления папки в PATH.
+### Лог-файл (Windows)
 
-**`Test Environment` в Paperclip показывает ошибку**
-→ Убедись, что `hermes --version` работает в PowerShell.
-→ Проверь, что `.env` файл существует в WSL: `wsl bash -lc "cat ~/.hermes/.env"`
+```
+%TEMP%\hermes_launch_debug.txt
+```
 
-**`Warning: Failed to load config` при запуске hermes**
-→ Проверь синтаксис `~/.hermes/config.yaml` — файл должен быть валидным YAML.
-→ Убедись, что нет лишних отступов: `model:` должен быть без отступа.
+Содержит: timestamp, argv, все Paperclip env vars, первые 80 символов промпта.
 
-**Hermes использует не ту модель**
-→ Проверь `~/.hermes/config.yaml`: строка `model: zai/glm-4.6` должна быть первой.
-→ В настройках агента в Paperclip поле **Model** тоже должно быть `zai/glm-4.6`.
+### Проверка промпта в Paperclip UI
+
+В транскрипте запуска ищи строки:
+```
+=== PROMPT SENT TO HERMES ===
+<текст промпта>
+=== END PROMPT ===
+```
+
+### Частые проблемы
+
+**`hermes: command not found` в WSL**
+→ Убедись что hermes установлен: `wsl bash -lc "which hermes"`
+→ Если нет: `wsl bash -lc "pip install --upgrade hermes-agent"`
+
+**`API fetch failed` в логе**
+→ Убедись что Paperclip запущен: `curl http://127.0.0.1:3100/api/health`
+→ Установи `TEST_MODE = True` в `launch_hermes.py` для отладки без API
+
+**Hermes получает пустой или разбитый промпт**
+→ Это классическая проблема cmd.exe-квотирования. Убедись что bash_cmd использует `$(cat /tmp/hermes_prompt.txt)` а не аргумент напрямую.
+
+**Задача не запускается повторно**
+→ Убери назначение агента ("No assignee"), подожди 2-3 секунды, назначь снова.
 
 ---
 
 ## Проверка работы
 
 ```powershell
-# 1. Hermes доступен в Windows
-hermes --version
-
-# 2. Hermes использует правильную модель (в WSL)
+# 1. Hermes установлен в WSL
 wsl bash -lc "hermes --version"
-wsl bash -lc "cat ~/.hermes/config.yaml | head -3"
 
-# 3. Paperclip запущен
+# 2. Config верный
+wsl bash -lc "head -3 ~/.hermes/config.yaml"
+# Ожидаемо: model: zai/glm-4.5-flash
+
+# 3. Заглушка вызывает правильный файл
+type C:\Users\vibecoder_blogger\ZIA\hermes.cmd
+
+# 4. Paperclip запущен
 curl http://127.0.0.1:3100/api/health
 ```
-Если есть сложности с настройкой, посмотрите полное видео на Ютубе: MiniMax (ZAI) + Paperclip оркестратор https://www.youtube.com/playlist?list=PL6D9b9lf9gb2_0Wpg5HcYenthYSK9KznR
+
+---
+
+## Полезные ссылки
+
+- YouTube-плейлист по настройке: https://www.youtube.com/playlist?list=PL6D9b9lf9gb2_0Wpg5HcYenthYSK9KznR
+- ZAI API ключи: https://z.ai/manage-apikey/apikey-list
+- Paperclip агенты: http://127.0.0.1:3100/MYA/agents/
