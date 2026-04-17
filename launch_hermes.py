@@ -1,44 +1,73 @@
+# launch_hermes.py
 """
 Windows -> WSL argument bridge for hermes.
 
-Root cause of quoting breakage:
-  resolveSpawnTarget builds: cmd.exe /d /s /c "hermes.cmd" chat -q "You are ""Hermes Dev"", ..." ...
-  cmd.exe /s/c strips outer quotes — Python sys.argv receives the prompt split
-  into individual words. Previous fix (stdin) put hermes in interactive mode
-  where it treated each line of the prompt as a separate turn.
+Лог-файлы:
+  logs/hermes_launch_debug.txt — накопленный лог всех запусков (append, лимит 1MB)
+  logs/последний_запуск.txt   — сырой вывод hermes из Linux, только текущий запуск (overwrite)
 
-Final fix:
-  1. Fetch task from Paperclip API via PAPERCLIP_TASK_ID env var.
-  2. Write the prompt to /tmp/hermes_prompt.txt in WSL via stdin pipe.
-  3. Call hermes with: -q "$(cat /tmp/hermes_prompt.txt)"
-     bash evaluates $(cat ...) INSIDE the double-quoted arg — the result is
-     a single -q value regardless of quotes/newlines in the file content.
-     No cmd.exe quoting anywhere on the prompt path.
-
-File locations:
-  This file (canonical):
-    C:\\Users\\vibecoder_blogger\\PycharmProjects\\
-      paperclip_hermes-paperclip-adapter_integration\\launch_hermes.py
-
-  Windows entry point (Paperclip adapter points here):
-    C:\\Users\\vibecoder_blogger\\ZIA\\hermes.cmd   ← stub, calls THIS file
-    C:\\Users\\vibecoder_blogger\\PycharmProjects\\...\\hermes.cmd  ← also calls THIS file
-
-  Paperclip env vars set by execute.js (only on Assignment runs):
-    PAPERCLIP_TASK_ID    — issue UUID to fetch from API
-    PAPERCLIP_AGENT_ID   — agent UUID
-    PAPERCLIP_COMPANY_ID — company/workspace UUID
-    PAPERCLIP_API_URL    — base URL, default http://127.0.0.1:3100
+Файлы проекта:
+  dist/hermes.exe             — скомпилированный исполняемый файл (Paperclip вызывает его)
+  temp/сердцебиение_paperclip.txt — raw argv heartbeat-вызовов
+  temp/задача_от_paperclip.txt    — raw argv task-вызовов
 """
 import subprocess
 import sys
 import os
-import json
-import urllib.request
+import datetime
+import threading
 
+# ── Определяем корень проекта (PyInstaller-aware) ─────────────────────────────
+if getattr(sys, 'frozen', False):
+    _project_dir = os.path.dirname(os.path.dirname(os.path.abspath(sys.executable)))
+else:
+    _project_dir = os.path.dirname(os.path.abspath(__file__))
+
+_logs_dir = os.path.join(_project_dir, 'logs')
+_temp_dir = os.path.join(_project_dir, 'temp')
+os.makedirs(_logs_dir, exist_ok=True)
+os.makedirs(_temp_dir, exist_ok=True)
+
+_debug_log   = os.path.join(_logs_dir, 'hermes_launch_debug.txt')
+_session_log = os.path.join(_logs_dir, 'последний_запуск.txt')
+
+_DEBUG_LOG_LIMIT = 1 * 1024 * 1024  # 1 MB
+
+# ── Функции логирования ───────────────────────────────────────────────────────
+
+def log(msg):
+    """Пишет только в накопленный debug-лог с таймстемпом. Если > 1MB — очищает."""
+    try:
+        if os.path.exists(_debug_log) and os.path.getsize(_debug_log) > _DEBUG_LOG_LIMIT:
+            mode = 'w'
+        else:
+            mode = 'a'
+        with open(_debug_log, mode, encoding='utf-8') as f:
+            f.write(f'{datetime.datetime.now().isoformat()} {msg}\n')
+    except Exception:
+        pass
+
+def _session_write_raw(data: bytes):
+    """Пишет сырые байты от hermes в лог текущего запуска."""
+    try:
+        with open(_session_log, 'ab') as f:
+            f.write(data)
+    except Exception:
+        pass
+
+# ── Старт сессии ──────────────────────────────────────────────────────────────
 args = sys.argv[1:]
+_start_time = datetime.datetime.now().isoformat()
 
-# Version check — proxy to real hermes in WSL so Paperclip can parse the version
+# Очищаем лог текущего запуска
+open(_session_log, 'w').close()
+
+log(f'\n=== НОВЫЙ ЗАПУСК {_start_time} ===')
+log(f'argv: {sys.argv}')
+for k in ['PAPERCLIP_TASK_ID', 'PAPERCLIP_AGENT_ID', 'PAPERCLIP_COMPANY_ID', 'PAPERCLIP_API_URL']:
+    log(f'{k}={os.environ.get(k, "<NOT SET>")}')
+
+# ── Version check ─────────────────────────────────────────────────────────────
 if not args or args[0] == '--version':
     result = subprocess.run(
         ['wsl', 'bash', '-lc', 'hermes --version'],
@@ -47,145 +76,140 @@ if not args or args[0] == '--version':
     print(result.stdout, end='')
     sys.exit(result.returncode)
 
-# Определяем корень проекта (работает и как .py и как .exe через PyInstaller)
-import datetime
-if getattr(sys, 'frozen', False):
-    # Запущен как .exe: dist/hermes.exe → поднимаемся на уровень выше
-    _project_dir = os.path.dirname(os.path.dirname(os.path.abspath(sys.executable)))
-else:
-    _project_dir = os.path.dirname(os.path.abspath(__file__))
-
-# Папки внутри проекта
-_logs_dir = os.path.join(_project_dir, 'logs')
-_temp_dir = os.path.join(_project_dir, 'temp')
-os.makedirs(_logs_dir, exist_ok=True)
-os.makedirs(_temp_dir, exist_ok=True)
-
-# Debug лог — теперь в logs/ внутри проекта
-_log = os.path.join(_logs_dir, 'hermes_launch_debug.txt')
-with open(_log, 'a', encoding='utf-8') as _f:
-    _f.write(f'\n=== {datetime.datetime.now().isoformat()} ===\n')
-    _f.write(f'argv: {sys.argv}\n')
-    for k in ['PAPERCLIP_TASK_ID','PAPERCLIP_AGENT_ID','PAPERCLIP_COMPANY_ID','PAPERCLIP_API_URL']:
-        _f.write(f'{k}={os.environ.get(k, "<NOT SET>")}\n')
-
-# Сохраняем raw вызов от Paperclip в temp/
+# ── Сохраняем raw вызов от Paperclip в temp/ ─────────────────────────────────
 _task_id_raw = os.environ.get('PAPERCLIP_TASK_ID', '')
-if _task_id_raw:
-    _raw_path = os.path.join(_temp_dir, 'задача_от_paperclip.txt')
-else:
-    _raw_path = os.path.join(_temp_dir, 'сердцебиение_paperclip.txt')
+_raw_path = os.path.join(_temp_dir, 'задача_от_paperclip.txt' if _task_id_raw else 'сердцебиение_paperclip.txt')
 with open(_raw_path, 'w', encoding='utf-8') as _f:
     _f.write('\n'.join(sys.argv))
 
-TEST_MODE = False
-
-# Update model config to free tier
+# ── Обновляем модель в конфиге WSL ───────────────────────────────────────────
 subprocess.run(
     ['wsl', 'bash', '-lc',
-     "sed -i 's|^model:.*|model: zai/glm-4.5-flash|' ~/.hermes/config.yaml"],
-    timeout=15
+     "sed -i 's|^model:.*|model: zai/glm-4.5-flash|' ~/.hermes/config.yaml"]
 )
 
-# ── Paperclip env vars (set by execute.js before spawning us) ─────────────────
-api_url    = os.environ.get('PAPERCLIP_API_URL', 'http://127.0.0.1:3100').rstrip('/')
-task_id    = os.environ.get('PAPERCLIP_TASK_ID', '')
-agent_id   = os.environ.get('PAPERCLIP_AGENT_ID', '')
-company_id = os.environ.get('PAPERCLIP_COMPANY_ID', '')
-
-api_base = api_url if api_url.endswith('/api') else api_url + '/api'
-
-# ── Fetch task from Paperclip API ─────────────────────────────────────────────
+# ── Извлекаем промпт из argv ──────────────────────────────────────────────────
 prompt = None
-if TEST_MODE:
-    prompt = 'привет'
-    with open(_log, 'a', encoding='utf-8') as _f:
-        _f.write(f'TEST_MODE=True — prompt hardcoded to: {prompt!r}\n')
-elif task_id:
+if '-q' in args:
+    _q_idx = args.index('-q')
+    if _q_idx + 1 < len(args):
+        prompt = args[_q_idx + 1]
+        log(f'prompt получен из -q ({len(prompt)} символов)')
+else:
+    log('нет -q аргумента')
+
+if prompt is None:
+    log('prompt=None → нет задачи, выходим')
+    sys.exit(0)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ШАГ 1: Проверяем доступность hermes
+# ═════════════════════════════════════════════════════════════════════════════
+log('ШАГ 1: hermes --version')
+try:
+    check = subprocess.run(
+        ['wsl', 'bash', '-lc', 'hermes --version'],
+        capture_output=True, text=True
+    )
+    if check.returncode != 0:
+        log(f'ШАГ 1 ОШИБКА: returncode={check.returncode} stderr={check.stderr.strip()!r}')
+        sys.exit(1)
+    log(f'ШАГ 1 OK: {check.stdout.strip()!r}')
+except subprocess.TimeoutExpired:
+    log('ШАГ 1 ОШИБКА: таймаут')
+    sys.exit(1)
+except FileNotFoundError:
+    log('ШАГ 1 ОШИБКА: wsl.exe не найден')
+    sys.exit(1)
+except Exception as e:
+    log(f'ШАГ 1 ОШИБКА: {type(e).__name__}: {e}')
+    sys.exit(1)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ШАГ 2: Запускаем hermes, ждём баннер загрузки
+# ═════════════════════════════════════════════════════════════════════════════
+log('ШАГ 2: запускаем hermes')
+try:
+    proc = subprocess.Popen(
+        ['wsl', 'bash', '-lc', 'hermes'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    log(f'ШАГ 2 OK: процесс запущен (pid={proc.pid})')
+except FileNotFoundError:
+    log('ШАГ 2 ОШИБКА: wsl.exe не найден')
+    sys.exit(1)
+except Exception as e:
+    log(f'ШАГ 2 ОШИБКА: {type(e).__name__}: {e}')
+    sys.exit(1)
+
+READY_INDICATORS = [
+    b'Welcome',
+    b'Hermes Agent',
+    b'\xe2\x9d\xaf',   # ❯
+]
+
+output_lines = []
+ready_event  = threading.Event()
+
+def _stdout_reader(proc, output_lines, ready_event):
+    """Читает stdout hermes: пишет сырые байты в последний_запуск.txt."""
     try:
-        url = f'{api_base}/issues/{task_id}'
-        req = urllib.request.Request(url, headers={'Accept': 'application/json'})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            issue = json.loads(resp.read().decode('utf-8'))
-        title = issue.get('title', '')
-        body  = (issue.get('body') or '').strip()
-        prompt = f'''You are "Hermes Dev", an AI agent employee in a Paperclip-managed company.
+        for raw_line in iter(proc.stdout.readline, b''):
+            output_lines.append(raw_line)
+            _session_write_raw(raw_line)
+            sys.stdout.buffer.write(raw_line)
+            sys.stdout.buffer.flush()
+            if not ready_event.is_set():
+                if any(ind in raw_line for ind in READY_INDICATORS):
+                    log(f'ШАГ 2: готов — {raw_line.decode("utf-8","replace").strip()!r}')
+                    ready_event.set()
+    except Exception as e:
+        log(f'_stdout_reader ОШИБКА: {type(e).__name__}: {e}')
+    finally:
+        ready_event.set()
 
-IMPORTANT: Use `terminal` tool with `curl` for ALL Paperclip API calls (web_extract and browser cannot access localhost).
+reader_thread = threading.Thread(
+    target=_stdout_reader,
+    args=(proc, output_lines, ready_event),
+    daemon=True
+)
+reader_thread.start()
 
-Your Paperclip identity:
-  Agent ID: {agent_id}
-  Company ID: {company_id}
-  API Base: {api_base}
+ready_event.wait()
+log('ШАГ 2 OK: hermes готов')
 
-## Assigned Task
+# ═════════════════════════════════════════════════════════════════════════════
+# ШАГ 3: Проверяем что hermes жив, отправляем промпт
+# ═════════════════════════════════════════════════════════════════════════════
+log('ШАГ 3: отправляем промпт')
 
-Issue ID: {task_id}
-Title: {title}
+if proc.poll() is not None:
+    log(f'ШАГ 3 ОШИБКА: hermes завершился до отправки промпта (returncode={proc.poll()})')
+    sys.exit(1)
 
-{body}
+try:
+    proc.stdin.write(prompt.encode('utf-8') + b'\n')
+    proc.stdin.flush()
+    proc.stdin.close()
+    log(f'ШАГ 3 OK: промпт отправлен ({len(prompt)} символов), stdin закрыт')
+except BrokenPipeError:
+    log('ШАГ 3 ОШИБКА: BrokenPipe — hermes умер при инициализации')
+    sys.exit(1)
+except Exception as e:
+    log(f'ШАГ 3 ОШИБКА: {type(e).__name__}: {e}')
+    sys.exit(1)
 
-## Workflow
-
-1. Work on the task using your tools
-2. When done, mark the issue as completed:
-   curl -s -X PATCH "{api_base}/issues/{task_id}" -H "Content-Type: application/json" -d \'{{"status":"done"}}\'
-3. Post a completion comment:
-   curl -s -X POST "{api_base}/issues/{task_id}/comments" -H "Content-Type: application/json" -d \'{{"body":"DONE: <your summary here>"}}\'
-'''
-    except Exception as exc:
-        sys.stderr.write(f'[launch_hermes] API fetch failed: {exc}\n')
-        with open(_log, 'a', encoding='utf-8') as _f:
-            _f.write(f'API fetch FAILED: {exc}\n')
-else:
-    if not TEST_MODE:
-        with open(_log, 'a', encoding='utf-8') as _f:
-            _f.write('PAPERCLIP_TASK_ID is empty — prompt=None, hermes will run interactive\n')
-
-# ── Extract simple single-word flags from argv (best-effort) ──────────────────
-model    = 'zai/glm-4.5-flash'
-provider = 'zai'
-source   = 'tool'
-resume   = None
-i = 0
-while i < len(args):
-    if   args[i] == '-m'         and i+1 < len(args): model    = args[i+1]; i += 2
-    elif args[i] == '--provider' and i+1 < len(args): provider = args[i+1]; i += 2
-    elif args[i] == '--source'   and i+1 < len(args): source   = args[i+1]; i += 2
-    elif args[i] == '--resume'   and i+1 < len(args): resume   = args[i+1]; i += 2
-    else: i += 1
-
-# ── Log final prompt decision ─────────────────────────────────────────────────
-with open(_log, 'a', encoding='utf-8') as _f:
-    if prompt is not None:
-        _f.write(f'prompt (first 80 chars): {prompt[:80]!r}\n')
-    else:
-        _f.write('prompt=None → interactive mode\n')
-
-# ── Write prompt to /tmp/hermes_prompt.txt in WSL ─────────────────────────────
-if prompt is not None:
-    subprocess.run(
-        ['wsl', 'bash', '-c', 'cat > /tmp/hermes_prompt.txt'],
-        input=prompt.encode('utf-8'),
-        timeout=10
-    )
-    # Use "$(cat file)" — bash passes entire file content as one -q argument.
-    # Prompt content is in the FILE, not in the command string — no quoting issues.
-    resume_part = f' --resume {resume}' if resume else ''
-    bash_cmd = (
-        f'echo "=== PROMPT SENT TO HERMES ===" && cat /tmp/hermes_prompt.txt && echo "=== END PROMPT ===" && '
-        f'/usr/local/bin/hermes chat'
-        f' -q "$(cat /tmp/hermes_prompt.txt)"'
-        f' -Q -m {model} --provider {provider} --source {source} --yolo'
-        f'{resume_part}'
-    )
-    result = subprocess.run(['wsl', 'bash', '-lc', bash_cmd])
-else:
-    # No task — start hermes interactively (gets EOF, exits 0)
-    bash_cmd = (
-        f'/usr/local/bin/hermes chat'
-        f' -Q -m {model} --provider {provider} --source {source} --yolo'
-    )
-    result = subprocess.run(['wsl', 'bash', '-lc', bash_cmd])
-
-sys.exit(result.returncode)
+# ═════════════════════════════════════════════════════════════════════════════
+# ШАГ 4: Ждём завершения hermes
+# ═════════════════════════════════════════════════════════════════════════════
+log('ШАГ 4: ждём завершения hermes (макс. 300 секунд)')
+try:
+    reader_thread.join()
+    returncode = proc.wait()
+    log(f'ШАГ 4 OK: hermes завершился с кодом {returncode}')
+    sys.exit(returncode)
+except Exception as e:
+    log(f'ШАГ 4 ОШИБКА: {type(e).__name__}: {e}')
+    sys.exit(1)
