@@ -272,6 +272,30 @@ C:\Users\<ИМЯ_ПОЛЬЗОВАТЕЛЯ>\.paperclip\instances\default\db\   �
 **Задача не запускается повторно**
 → Убери назначение агента ("No assignee"), подожди 2-3 секунды, назначь снова.
 
+**Test Environment проходит, но реальный запуск падает — `hermesCommand` не применяется**
+
+Это известный баг Paperclip: поле **Hermes Command** в UI сохраняется в базу данных под ключом
+`hermesCommand`, но если агент создавался ранее (или конфиг редактировался вручную), в базе может
+лежать старый ключ `command`. Код `hermes-paperclip-adapter/server/execute.js` читает только
+`config.hermesCommand` — если его нет, путь к `dist\hermes.exe` **игнорируется** и вместо него
+берётся `hermes` из PATH.
+
+Проверить что реально лежит в базе:
+```bash
+curl -s "http://127.0.0.1:3100/api/companies/<COMPANY_ID>/agents" | \
+  python3 -c "import sys,json; [print(a['id'], a['name'], a.get('adapterConfig',{}).get('hermesCommand','<missing>'), a.get('adapterConfig',{}).get('command','')) for a in json.loads(sys.stdin.read())]"
+```
+
+Если в выводе у агента `hermesCommand` равен `<missing>` (но `command` присутствует) — нужно
+обновить запись через API:
+```bash
+curl -s -X PATCH "http://127.0.0.1:3100/api/agents/<AGENT_ID>" \
+  -H "Content-Type: application/json" \
+  -d "{\"adapterConfig\":{\"hermesCommand\":\"C:\\\\Users\\\\<USER>\\\\PycharmProjects\\\\paperclip_hermes-paperclip-adapter_integration\\\\dist\\\\hermes.exe\",\"env\":{\"ZAI_API_KEY\":\"...\",\"GLM_API_KEY\":\"...\"}}}"
+```
+
+После обновления перезапустить агента в Paperclip UI (убери/поставь назначение) и проверить логи.
+
 ---
 
 ## Проверка работы

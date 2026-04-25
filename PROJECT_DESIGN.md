@@ -222,8 +222,53 @@ C:\Users\vibecoder_blogger\.local\bin\hermes.cmd
 
 C:\Users\vibecoder_blogger\AppData\Local\Microsoft\WindowsApps\hermes.cmd
   → делегирует в C:\Users\vibecoder_blogger\Documents\Claude\Projects\ZIA\hermes.cmd
-  ⚠️ ЭТОТ ФАЙЛ НЕ СУЩЕСТВУЕТ — стale-ссылка, не использовать
+  ⚠️ ЭТОТ ФАЙЛ НЕ СУЩЕСТВУЕТ — stale-ссылка, не использовать
 ```
 
-**Правило:** Paperclip вызывает `dist\hermes.exe` напрямую (по пути в настройках агента),
-не через PATH. PATH-заглушки нужны только для ручного запуска `hermes` из CMD.
+**Порядок поиска hermes в PATH (по выводу `where hermes`):**
+```
+1. C:\...\paperclip_hermes-paperclip-adapter_integration\hermes.cmd  ← первый!
+2. C:\...\bin\hermes.bat
+3. C:\...\AppData\Local\Microsoft\WindowsApps\hermes.cmd             ← СЛОМАН
+4. C:\...\.local\bin\hermes.cmd
+```
+`resolveSpawnTarget` (из `@paperclipai/adapter-utils`) находит первый `.cmd` в PATH-директориях
+по порядку расширений `.EXE → .CMD → .BAT`. Первым находится наш проектный `hermes.cmd`.
+
+---
+
+### ⚠️ Баг: `command` vs `hermesCommand` в adapterConfig
+
+**Симптом:** Test Environment в UI проходит, но реальный запуск агента падает с ошибкой bash
+или игнорирует `dist\hermes.exe`.
+
+**Причина:** UI-форма передаёт путь к hermes-бинарнику в поле с именем `command`.
+`buildHermesConfig` (из `hermes-paperclip-adapter/dist/ui/build-config.js`) переименовывает его:
+```javascript
+ac.hermesCommand = v.command;  // UI 'command' → сохраняется как 'hermesCommand'
+```
+НО если агент был создан раньше (до текущей версии адаптера или через прямое редактирование),
+в базе данных PostgreSQL может лежать старый ключ `"command"` вместо `"hermesCommand"`.
+Код `execute.js` читает только `config.hermesCommand` — если его нет, путь к exe **игнорируется**
+и вместо него берётся дефолтный `hermes` из PATH.
+
+**Как проверить** что реально лежит в БД (через Paperclip REST API):
+```bash
+curl -s "http://127.0.0.1:3100/api/companies/<COMPANY_ID>/agents" | \
+  python3 -c "import sys,json
+for a in json.loads(sys.stdin.read()):
+  cfg = a.get('adapterConfig', {}) or {}
+  print(a['id'], a['name'])
+  print('  hermesCommand:', cfg.get('hermesCommand', '<MISSING — нужно исправить!>'))
+  print('  command:      ', cfg.get('command', '<not set>'))"
+```
+
+**Как исправить** — обновить запись через API, добавив правильный ключ `hermesCommand`:
+```bash
+curl -s -X PATCH "http://127.0.0.1:3100/api/agents/<AGENT_ID>" \
+  -H "Content-Type: application/json" \
+  -d "{\"adapterConfig\":{\"hermesCommand\":\"C:\\\\Users\\\\vibecoder_blogger\\\\PycharmProjects\\\\paperclip_hermes-paperclip-adapter_integration\\\\dist\\\\hermes.exe\",\"env\":{\"ZAI_API_KEY\":\"<KEY>\",\"GLM_API_KEY\":\"<KEY>\"}}}"
+```
+
+> После PATCH — сохранить в Paperclip UI (или перезапустить агента), чтобы изменения вступили
+> в силу. Проверить: повторить запрос GET и убедиться что `hermesCommand` теперь установлен.
