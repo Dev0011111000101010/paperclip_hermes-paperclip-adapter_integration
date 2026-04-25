@@ -168,3 +168,62 @@ import tempfile, datetime
 **Шаги:** 4 шага (pip install → config → hermes.bat → verify)
 
 **Детали:** см. install_hermes_wsl.ps1
+
+---
+
+## ПУТИ К ДАННЫМ СИСТЕМЫ
+
+> ⚠️ `vibecoder_blogger` — имя конкретного пользователя. У других будет другое имя в пути.
+> Базовая переменная Windows: `%USERPROFILE%` = `C:\Users\<ИМЯ_ПОЛЬЗОВАТЕЛЯ>`
+
+### Логи нашего моста (hermes_launch_debug)
+
+```
+C:\Users\vibecoder_blogger\PycharmProjects\
+  paperclip_hermes-paperclip-adapter_integration\
+    logs\hermes_launch_debug.txt   ← накопленный лог всех запусков (до 1 МБ)
+    logs\последний_запуск.txt      ← сырой stdout hermes из WSL (только последний запуск)
+```
+
+Содержат: timestamp, argv от Paperclip, env vars (PAPERCLIP_TASK_ID и др.),
+этапы ШАГ 1–4, exit code. **Смотреть сюда при любых ошибках запуска hermes.**
+
+### Данные Paperclip (порт 3100, экземпляр "default")
+
+```
+C:\Users\vibecoder_blogger\.paperclip\instances\default\
+  config.json         ← конфигурация экземпляра (порт, база данных)
+  .env                ← переменные окружения экземпляра
+  logs\
+    server.log        ← HTTP-лог сервера (запросы/ответы API)
+  db\                 ← embedded PostgreSQL (данные агентов, задач, компаний)
+  data\backups\       ← автобэкапы БД (каждый час, хранятся 30 дней)
+  companies\<company_id>\
+    agents\<agent_id>\
+      instructions\   ← AGENTS.md, HEARTBEAT.md, SOUL.md, TOOLS.md (промпты агента)
+```
+
+> Если несколько экземпляров Paperclip (разные порты) — у каждого свой `PAPERCLIP_INSTANCE_ID`.
+> Данные хранятся в `~/.paperclip/instances/<instance_id>/`.
+> Экземпляр "default" соответствует порту 3100 (управляющий).
+
+### Конфиг hermes в WSL
+
+```
+~/.hermes/config.yaml   ← модель, провайдер, base_url, параметры агента
+~/.hermes/.env          ← ZAI_API_KEY, GLM_API_KEY
+```
+
+### hermes.cmd в Windows PATH (заглушки)
+
+```
+C:\Users\vibecoder_blogger\.local\bin\hermes.cmd
+  → делегирует в launch_hermes.py нашего проекта
+
+C:\Users\vibecoder_blogger\AppData\Local\Microsoft\WindowsApps\hermes.cmd
+  → делегирует в C:\Users\vibecoder_blogger\Documents\Claude\Projects\ZIA\hermes.cmd
+  ⚠️ ЭТОТ ФАЙЛ НЕ СУЩЕСТВУЕТ — стale-ссылка, не использовать
+```
+
+**Правило:** Paperclip вызывает `dist\hermes.exe` напрямую (по пути в настройках агента),
+не через PATH. PATH-заглушки нужны только для ручного запуска `hermes` из CMD.

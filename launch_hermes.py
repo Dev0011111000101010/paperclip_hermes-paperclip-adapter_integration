@@ -144,15 +144,17 @@ except Exception as e:
 # ШАГ 3: Запускаем hermes с -q, весь вывод пишем в лог
 # ═════════════════════════════════════════════════════════════════════════════
 log('ШАГ 3: формируем runner-скрипт и запускаем hermes в WSL')
-# Пробрасываем все оригинальные флаги Paperclip (кроме -q и его значения)
+# Пробрасываем флаги Paperclip, кроме: -q (промпт из файла), -m и --provider
+# (модель берётся из WSL ~/.hermes/config.yaml, обновлённого sed выше)
+_SKIP_FLAGS = {'-q', '-m', '--provider'}
 _forward_args = []
-_skip_q = False
+_skip_val = False
 for _a in args:
-    if _skip_q:
-        _skip_q = False
+    if _skip_val:
+        _skip_val = False
         continue
-    if _a == '-q':
-        _skip_q = True
+    if _a in _SKIP_FLAGS:
+        _skip_val = True
         continue
     _forward_args.append(_a)
 

@@ -1,7 +1,7 @@
 # Hermes Agent + Paperclip + ZAI — Интеграция и настройка
 
 Эта инструкция описывает полную рабочую связку:
-**Paperclip** (оркестратор AI-агентов) → **hermes.cmd** (Windows-мост) → **WSL2/Ubuntu** → **Hermes Agent** → **ZAI API** (модель `zai/glm-4.5-flash`, бесплатно).
+**Paperclip** (оркестратор AI-агентов) → **hermes.cmd** (Windows-мост) → **WSL2/Ubuntu** → **Hermes Agent** → **ZAI API** (модель `zai/glm-4.6`, бесплатно).
 
 ## Официальные ссылки
 
@@ -41,16 +41,17 @@ C:\Users\vibecoder_blogger\PycharmProjects\
   paperclip_hermes-paperclip-adapter_integration\launch_hermes.py   ← ВСЯ ЛОГИКА ЗДЕСЬ
     │
     │  1. Читает env vars: PAPERCLIP_TASK_ID, PAPERCLIP_API_URL, ...
-    │  2. Делает HTTP GET к Paperclip API → получает текст задачи
-    │  3. Пишет промпт в /tmp/hermes_prompt.txt (через WSL pipe)
-    │  4. Запускает: wsl bash -lc '/usr/local/bin/hermes chat -q "$(cat /tmp/hermes_prompt.txt)" ...'
+    │  2. Обновляет модель в ~/.hermes/config.yaml через sed
+    │  3. Пишет промпт в /tmp/hermes_prompt.txt (через WSL stdin-pipe)
+    │  4. Пишет runner-скрипт в /tmp/run_hermes.py (через WSL stdin-pipe)
+    │  5. Запускает: wsl bash -lc 'python3 /tmp/run_hermes.py'
     ▼
-WSL2 Ubuntu — /usr/local/bin/hermes chat
+WSL2 Ubuntu — hermes chat
     │
-    │  ~/.hermes/config.yaml (модель, провайдер)
+    │  ~/.hermes/config.yaml (модель zai/glm-4.6, провайдер zai)
     │  ~/.hermes/.env (ZAI_API_KEY)
     ▼
-ZAI API (https://api.z.ai/api/paas/v4) — модель zai/glm-4.5-flash
+ZAI API (https://api.z.ai/api/paas/v4) — модель zai/glm-4.6
 ```
 
 ---
@@ -84,7 +85,7 @@ ZAI API (https://api.z.ai/api/paas/v4) — модель zai/glm-4.5-flash
 | Файл | Куда класть | Что делает |
 |------|-------------|-----------|
 | `hermes.bat` | `C:\Users\<USER>\bin\hermes.bat` | Простая обёртка для ручного CLI-вызова hermes из Windows |
-| `config.yaml` | `~/.hermes/config.yaml` (в WSL) | Конфиг hermes: модель zai/glm-4.5-flash, провайдер zai |
+| `config.yaml` | `~/.hermes/config.yaml` (в WSL) | Конфиг hermes: модель zai/glm-4.6, провайдер zai |
 | `.env.template` | `~/.hermes/.env` (в WSL, переименовать) | Шаблон для API ключей ZAI |
 | `install_hermes_wsl.ps1` | Любая папка Windows | Автоматическая установка всей связки |
 
@@ -96,55 +97,23 @@ ZAI API (https://api.z.ai/api/paas/v4) — модель zai/glm-4.5-flash
 
 **Путь:** `C:\Users\vibecoder_blogger\PycharmProjects\paperclip_hermes-paperclip-adapter_integration\launch_hermes.py`
 
-Ключевые части:
+**Почему промпт передаётся через файл, а не как аргумент:**
 
-```python
-TEST_MODE = False          # True — тестовый режим (промпт = 'привет')
-                            # False — рабочий режим (промпт берётся из Paperclip API)
+Промпт от Paperclip содержит `"` (двойные кавычки). Если передать их напрямую
+через аргумент `wsl python3 -c "код с кавычками"`, WSL внутри пробрасывает
+команду через bash — и bash падает с `unexpected EOF while looking for matching '"'`.
 
-# Paperclip передаёт эти env vars только в Assignment-запусках:
-task_id    = os.environ.get('PAPERCLIP_TASK_ID', '')   # UUID задачи
-agent_id   = os.environ.get('PAPERCLIP_AGENT_ID', '')
-company_id = os.environ.get('PAPERCLIP_COMPANY_ID', '')
-api_url    = os.environ.get('PAPERCLIP_API_URL', 'http://127.0.0.1:3100')
-```
-
-**Ключевой фикс квотирования** (почему промпт пишется в файл, а не передаётся аргументом):
+**Итоговое решение (без проблем с кавычками):**
 
 ```
-ПРОБЛЕМА: cmd.exe /d /s /c "hermes.cmd" chat -q "You are ""Hermes Dev"", ..."
-  → cmd.exe /s/c снимает внешние кавычки
-  → Python получает промпт разбитым на отдельные слова в sys.argv
-
-ПРЕДЫДУЩАЯ ПОПЫТКА (stdin): hermes запускался в интерактивном режиме,
-  каждая строка промпта воспринималась как отдельный turn.
-
-ФИНАЛЬНОЕ РЕШЕНИЕ:
-  1. Записать промпт в файл: wsl bash -c "cat > /tmp/hermes_prompt.txt"
-  2. Передать в hermes: -q "$(cat /tmp/hermes_prompt.txt)"
-  Bash вычисляет $(cat ...) ВНУТРИ двойных кавычек — результат это ОДИН аргумент,
-  независимо от кавычек и переносов строк в содержимом файла.
-  Ни один символ промпта не проходит через cmd.exe.
+1. Промпт → /tmp/hermes_prompt.txt   через wsl bash -c 'cat > ...'  (stdin-pipe, нет кавычек)
+2. Runner-скрипт → /tmp/run_hermes.py  через wsl bash -c 'cat > ...'  (stdin-pipe, нет кавычек)
+3. Запуск: wsl bash -lc 'python3 /tmp/run_hermes.py'
+   Runner читает промпт из файла и вызывает hermes через subprocess list (без shell=True)
 ```
 
-Фрагмент кода с фиксом:
-```python
-# Запись промпта в WSL файл
-subprocess.run(
-    ['wsl', 'bash', '-c', 'cat > /tmp/hermes_prompt.txt'],
-    input=prompt.encode('utf-8'),
-    timeout=10
-)
-
-# Запуск hermes — $(cat file) = промпт как один аргумент, без проблем с кавычками
-bash_cmd = (
-    'echo "=== PROMPT SENT TO HERMES ===" && cat /tmp/hermes_prompt.txt && echo "=== END PROMPT ===" && '
-    '/usr/local/bin/hermes chat'
-    ' -q "$(cat /tmp/hermes_prompt.txt)"'
-    ' -Q -m zai/glm-4.5-flash --provider zai --source tool --yolo'
-)
-result = subprocess.run(['wsl', 'bash', '-lc', bash_cmd])
-```
+Runner-скрипт формируется динамически и включает все флаги Paperclip кроме
+`-m` и `--provider` (модель берётся из WSL конфига `~/.hermes/config.yaml`).
 
 ### `ZIA\hermes.cmd` — заглушка
 
@@ -165,7 +134,7 @@ python "C:\Users\vibecoder_blogger\PycharmProjects\paperclip_hermes-paperclip-ad
 **Путь:** `~/.hermes/config.yaml` (внутри WSL Ubuntu)
 
 ```yaml
-model: zai/glm-4.5-flash
+model: zai/glm-4.6
 provider: zai
 base_url: https://api.z.ai/api/paas/v4
 compression:
@@ -265,21 +234,24 @@ npx paperclipai@latest start
 
 ## Отладка
 
-### Лог-файл (Windows)
+### Лог-файлы
 
+**Наш мост (главные логи для отладки hermes):**
 ```
-%TEMP%\hermes_launch_debug.txt
+<папка_проекта>\logs\hermes_launch_debug.txt   — все запуски, append, до 1 МБ
+<папка_проекта>\logs\последний_запуск.txt      — сырой stdout hermes (только последний)
 ```
+Содержат: timestamp, argv от Paperclip, PAPERCLIP_* env vars, этапы ШАГ 1–4, exit code.
 
-Содержит: timestamp, argv, все Paperclip env vars, первые 80 символов промпта.
-
-### Проверка промпта в Paperclip UI
-
-В транскрипте запуска ищи строки:
+**Paperclip (HTTP-лог сервера):**
 ```
-=== PROMPT SENT TO HERMES ===
-<текст промпта>
-=== END PROMPT ===
+C:\Users\<ИМЯ_ПОЛЬЗОВАТЕЛЯ>\.paperclip\instances\default\logs\server.log
+```
+Содержит: HTTP-запросы к API (200/304/500 и т.д.). Записей о запусках hermes здесь нет.
+
+**База данных Paperclip:**
+```
+C:\Users\<ИМЯ_ПОЛЬЗОВАТЕЛЯ>\.paperclip\instances\default\db\   — embedded PostgreSQL
 ```
 
 ### Частые проблемы
@@ -292,8 +264,10 @@ npx paperclipai@latest start
 → Убедись что Paperclip запущен: `curl http://127.0.0.1:3100/api/health`
 → Установи `TEST_MODE = True` в `launch_hermes.py` для отладки без API
 
-**Hermes получает пустой или разбитый промпт**
-→ Это классическая проблема cmd.exe-квотирования. Убедись что bash_cmd использует `$(cat /tmp/hermes_prompt.txt)` а не аргумент напрямую.
+**`bash: -c: line 1: unexpected EOF while looking for matching '"'`**
+→ Классическая проблема WSL-квотирования: промпт или код содержат `"` и ломают bash.
+→ Убедись что используется актуальная версия `dist\hermes.exe` (собранная из последней `launch_hermes.py`).
+→ Пересобрать: `pyinstaller --clean hermes.spec`
 
 **Задача не запускается повторно**
 → Убери назначение агента ("No assignee"), подожди 2-3 секунды, назначь снова.
@@ -308,7 +282,7 @@ wsl bash -lc "hermes --version"
 
 # 2. Config верный
 wsl bash -lc "head -3 ~/.hermes/config.yaml"
-# Ожидаемо: model: zai/glm-4.5-flash
+# Ожидаемо: model: zai/glm-4.6
 
 # 3. Заглушка вызывает правильный файл
 type C:\Users\vibecoder_blogger\ZIA\hermes.cmd

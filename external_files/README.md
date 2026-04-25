@@ -50,7 +50,7 @@ cp /mnt/c/путь/к/проекту/external_files/wsl/hermes_config.yaml ~/.he
 Или создать `~/.hermes/config.yaml` вручную с таким содержимым:
 
 ```yaml
-model: zai/glm-4.5-flash
+model: zai/glm-4.6
 provider: zai
 base_url: https://api.z.ai/api/paas/v4
 ```
@@ -114,7 +114,7 @@ wsl --shutdown
 
 ```cmd
 pip install pyinstaller
-pyinstaller --onefile --name hermes launch_hermes.py --distpath dist
+pyinstaller --clean hermes.spec
 ```
 
 Результат: `dist\hermes.exe` — это исполняемый файл, который Paperclip вызывает
@@ -128,11 +128,12 @@ pyinstaller --onefile --name hermes launch_hermes.py --distpath dist
 Paperclip (Node.js :3100)
     ↓  вызывает hermesCommand = dist\hermes.exe
 dist\hermes.exe  (= launch_hermes.py скомпилированный)
-    ↓  записывает промпт в /tmp/hermes_prompt.txt через WSL
-    ↓  запускает: wsl python3 -c "subprocess.run(['hermes','chat','-q',prompt])"
-Hermes Agent (WSL, /usr/local/bin/hermes)
+    ↓  stdin-pipe → /tmp/hermes_prompt.txt  (промпт без bash-квотирования)
+    ↓  stdin-pipe → /tmp/run_hermes.py      (runner-скрипт)
+    ↓  запускает: wsl bash -lc 'python3 /tmp/run_hermes.py'
+Hermes Agent (WSL, ~/.hermes/config.yaml → model: zai/glm-4.6)
     ↓  отправляет запрос
-ZAI API (https://api.z.ai, model: glm-4.5-flash)
+ZAI API (https://api.z.ai, model: glm-4.6)
     ↓  выполняет задачу, вызывает curl к Paperclip API
     ↓  curl http://127.0.0.1:3100/api/...  ← работает благодаря .wslconfig mirrored
 Paperclip API  ✓
