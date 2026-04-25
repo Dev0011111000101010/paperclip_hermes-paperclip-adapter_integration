@@ -16,6 +16,7 @@ import sys
 import os
 import datetime
 import threading
+import json
 
 # ── Определяем корень проекта (PyInstaller-aware) ─────────────────────────────
 if getattr(sys, 'frozen', False):
@@ -85,7 +86,7 @@ with open(_raw_path, 'w', encoding='utf-8') as _f:
 # ── Обновляем модель в конфиге WSL ───────────────────────────────────────────
 subprocess.run(
     ['wsl', 'bash', '-lc',
-     "sed -i 's|^model:.*|model: zai/glm-4.5-flash|' ~/.hermes/config.yaml"]
+     "sed -i 's|^model:.*|model: zai/glm-4.6|' ~/.hermes/config.yaml"]
 )
 
 # ── Извлекаем промпт из argv ──────────────────────────────────────────────────
@@ -142,27 +143,57 @@ except Exception as e:
 # ═════════════════════════════════════════════════════════════════════════════
 # ШАГ 3: Запускаем hermes с -q, весь вывод пишем в лог
 # ═════════════════════════════════════════════════════════════════════════════
-log('ШАГ 3: запускаем hermes chat через python3 в WSL (без bash-кавычек)')
+log('ШАГ 3: формируем runner-скрипт и запускаем hermes в WSL')
+# Пробрасываем все оригинальные флаги Paperclip (кроме -q и его значения)
+_forward_args = []
+_skip_q = False
+for _a in args:
+    if _skip_q:
+        _skip_q = False
+        continue
+    if _a == '-q':
+        _skip_q = True
+        continue
+    _forward_args.append(_a)
+
+_hermes_cmd = ['hermes'] + _forward_args
+_runner_lines = [
+    'import subprocess, sys',
+    f'cmd = {json.dumps(_hermes_cmd)}',
+    'p = open("/tmp/hermes_prompt.txt").read()',
+    'try:',
+    '    idx = cmd.index("chat") + 1',
+    'except ValueError:',
+    '    idx = 1',
+    'cmd = cmd[:idx] + ["-q", p] + cmd[idx:]',
+    'r = subprocess.run(cmd)',
+    'sys.exit(r.returncode)',
+]
+_runner_script = '\n'.join(_runner_lines) + '\n'
+
 try:
-    # Используем python3 в WSL чтобы передать промпт напрямую как аргумент,
-    # без bash-интерпретации кавычек и бэктиков внутри промпта
-    py_cmd = (
-        'import subprocess, sys; '
-        'p = open("/tmp/hermes_prompt.txt").read(); '
-        'r = subprocess.run(["hermes", "chat", "-q", p, "--yolo"]); '
-        'sys.exit(r.returncode)'
+    subprocess.run(
+        ['wsl', 'bash', '-c', 'cat > /tmp/run_hermes.py'],
+        input=_runner_script.encode('utf-8'),
+        check=True
     )
+    log('ШАГ 3a OK: /tmp/run_hermes.py записан')
+except Exception as e:
+    log(f'ШАГ 3 ОШИБКА (write runner): {type(e).__name__}: {e}')
+    sys.exit(1)
+
+try:
     proc = subprocess.Popen(
-        ['wsl', 'python3', '-c', py_cmd],
+        ['wsl', 'bash', '-lc', 'python3 /tmp/run_hermes.py'],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
-    log(f'ШАГ 3 OK: процесс запущен (pid={proc.pid})')
+    log(f'ШАГ 3b OK: процесс запущен (pid={proc.pid}), cmd={_hermes_cmd!r}')
 except FileNotFoundError:
-    log('ШАГ 3 ОШИБКА: wsl.exe не найден')
+    log('ШАГ 3b ОШИБКА: wsl.exe не найден')
     sys.exit(1)
 except Exception as e:
-    log(f'ШАГ 3 ОШИБКА: {type(e).__name__}: {e}')
+    log(f'ШАГ 3b ОШИБКА: {type(e).__name__}: {e}')
     sys.exit(1)
 
 def _stdout_reader(proc):
