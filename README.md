@@ -1,6 +1,6 @@
 # 🚚 This project has moved
 
-**Paperclip × Hermes × ZAI / MiniMax — free local AI agents on Windows/WSL2** now lives at its new home under
+**The Paperclip × Hermes × ZAI / MiniMax Windows/WSL2 integration setup** now lives at its new home under
 [**@VibeCodeBlogger**](https://github.com/VibeCodeBlogger):
 
 ## 👉 [paperclip-hermes-paperclip-adapter-integration-free-glm-4.6-zai-minimax-llm-windows-wsl2](https://github.com/VibeCodeBlogger-Public/paperclip-hermes-paperclip-adapter-integration-free-glm-4.6-zai-minimax-llm-windows-wsl2)
